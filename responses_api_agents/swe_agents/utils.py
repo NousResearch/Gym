@@ -301,6 +301,11 @@ def get_trajectory_and_tools(
                     print("No agent_tools_file configured for SWE-agent", flush=True)
         else:
             print(f"No trajectory files found in {trajectories_dir}", flush=True)
+    elif agent_framework == "hermes":
+        # For hermes, trajectory and tools are returned directly in the result
+        # dict by RunHermesAgent — no file I/O needed. This branch is a no-op
+        # fallback; callers should check for result["trajectory"] first.
+        print(f"Hermes trajectory should be in result dict directly (not files)", flush=True)
     else:
         print(f"Unsupported agent framework: {agent_framework}", flush=True)
 
@@ -663,6 +668,119 @@ async def run_swebench_evaluation(
     return result
 
 
+### Hermes SWE-bench evaluation ###
+
+
+async def run_hermes_swebench_evaluation(
+    problem_info: Dict,
+    model_endpoint: str,
+    body: NeMoGymResponseCreateParamsNonStreaming,
+    run_session_id: str,
+    agent_max_turns: int,
+    swebench_tests_timeout: int,
+    swebench_agent_timeout: int,
+    hermes_setup_dir: Optional[Path] = None,
+    hermes_home_dir: Optional[Path] = None,
+    swebench_setup_dir: Optional[Path] = None,
+    r2e_gym_setup_dir: Optional[Path] = None,
+    dataset_path: Optional[str] = None,
+    instance_dir: Optional[str] = None,
+    ray_queue_time: Optional[float] = None,
+    ray_submit_time: Optional[float] = None,
+    user_prompt_template: Optional[str] = None,
+    system_prompt_template: Optional[str] = None,
+) -> Dict:
+    """Run SWE-bench evaluation using hermes-agent inside Apptainer containers.
+
+    Uses RunHermesAgent which inherits container execution and evaluation
+    infrastructure from RunOpenHandsAgent. Hermes-agent is pre-built in
+    hermes_setup_dir and mounted into the SWE-bench container.
+
+    hermes_home_dir: path to ~/.hermes (or equivalent) — mounted into the
+    container so config.yaml, .env (API keys), memory, and skills are available.
+    """
+    from responses_api_agents.swe_agents.run_hermes import RunHermesAgent
+
+    workspace_root = Path(os.path.dirname(os.path.abspath(__file__)))
+    instance_id = problem_info.get("instance_id", "unknown")
+    persistent_dir = workspace_root / f"swebench_results_{run_session_id}" / (instance_dir or instance_id)
+    persistent_dir.mkdir(parents=True, exist_ok=True)
+    output_file = persistent_dir / "output.jsonl"
+
+    inference_params = {}
+    for param, key in [
+        ("temperature", "temperature"),
+        ("top_p", "top_p"),
+        ("max_output_tokens", "tokens_to_generate"),
+    ]:
+        value = getattr(body, param, None)
+        if value is not None:
+            inference_params[key] = value
+
+    cfg = SweBenchGenerationConfig(
+        output_file=output_file,
+        agent_framework=SupportedAgentFrameworks.openhands,  # unused but required by parent
+        agent_max_turns=agent_max_turns,
+        swebench_tests_timeout=swebench_tests_timeout,
+        swebench_agent_timeout=swebench_agent_timeout,
+        inference=SweBenchInferenceConfig(**inference_params),
+        server={"model": body.model, "base_url": model_endpoint},
+        user_prompt_template=user_prompt_template,
+        system_prompt_template=system_prompt_template,
+    )
+
+    runner = RunHermesAgent(
+        cfg=cfg,
+        hermes_setup_dir=hermes_setup_dir,
+        hermes_home_dir=hermes_home_dir,
+        swebench_setup_dir=swebench_setup_dir,
+        r2e_gym_setup_dir=r2e_gym_setup_dir,
+        dataset_path=dataset_path,
+    )
+    result = await runner.process_single_datapoint(problem_info)
+    print(f"Hermes process completed for {instance_id}", flush=True)
+
+    if ray_submit_time and ray_queue_time:
+        result.setdefault("hermes_metrics", {})["ray_time_in_queue"] = ray_submit_time - ray_queue_time
+
+    try:
+        with open(output_file, "w") as f:
+            json.dump(result, f, default=str)
+    except Exception as e:
+        print(f"Failed to write result to {output_file}: {e}", flush=True)
+
+    # Extract trajectory from the trajectory file written by the in-container runner
+    trajectories_dir = persistent_dir / "trajectories"
+    trajectory_data, tools = get_hermes_trajectory(trajectories_dir, instance_id)
+    result["tools"] = tools
+    result["trajectory"] = trajectory_data
+
+    return result
+
+
+def get_hermes_trajectory(trajectories_dir: Path, instance_id: str) -> tuple:
+    """Extract trajectory and tools from hermes-agent output.
+
+    Hermes writes a trajectory.json file containing the full conversation
+    with token IDs and logprobs per-message.
+    """
+    traj_file = trajectories_dir / instance_id / "trajectory.json"
+    if not traj_file.exists():
+        print(f"No hermes trajectory found at {traj_file}", flush=True)
+        return None, []
+
+    try:
+        with open(traj_file, "r") as f:
+            data = json.load(f)
+        messages = data.get("messages", [])
+        tools = data.get("tools", [])
+        print(f"Loaded hermes trajectory ({len(messages)} messages)", flush=True)
+        return messages, tools
+    except Exception as e:
+        print(f"Failed to read hermes trajectory: {e}", flush=True)
+        return None, []
+
+
 ### Harness and Evaluation Setup Utils ###
 
 
@@ -979,6 +1097,80 @@ echo "R2E-Gym setup complete!"
         print(f"  - venv: {r2e_gym_dir / '.venv'}", flush=True)
         print(f"  - uv: {uv_dir}", flush=True)
         print(f"  - Python: {python_dir}", flush=True)
+
+        return setup_dir
+
+
+def setup_hermes_environment(
+    hermes_repo: str = "https://github.com/NousResearch/hermes-agent.git",
+    hermes_branch: str = "nemo-gym-changes",
+    setup_dir: Optional[Path] = None,
+) -> Path:
+    """Pre-build hermes-agent environment for mounting into Apptainer containers.
+
+    Uses hermes-agent's own install.sh script with --skip-setup (bypasses the
+    interactive setup wizard) so the installed environment is identical to what
+    a normal user gets, minus the interactive prompts.
+    """
+    setup_dir = _resolve_setup_directory(setup_dir, "swe_hermes_setup")
+
+    with _setup_directory_lock(setup_dir, "hermes-agent"):
+        hermes_dir = setup_dir / "hermes-agent"
+
+        if hermes_dir.exists() and Path(hermes_dir / "venv" / "bin" / "python").exists():
+            print(f"Hermes-agent already set up at {setup_dir}", flush=True)
+            return setup_dir
+
+        print(f"Setting up hermes-agent environment at {setup_dir}...", flush=True)
+        shutil.rmtree(setup_dir, ignore_errors=True)
+        setup_dir.mkdir(parents=True, exist_ok=True)
+
+        script_name = "setup_hermes.sh"
+        script_content = f"""#!/bin/bash
+set -e
+set -x
+
+cd {setup_dir}
+
+# Install uv if not present
+if ! command -v uv &> /dev/null; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+fi
+
+# Clone hermes-agent
+if [ ! -d "{hermes_dir}/.git" ]; then
+    git clone --branch {hermes_branch} {hermes_repo} {hermes_dir} || \
+    git clone --branch {hermes_branch} https://github.com/NousResearch/hermes-agent.git {hermes_dir}
+fi
+
+cd {hermes_dir}
+git checkout {hermes_branch}
+
+# Create venv with Python 3.12 (hermes requires >=3.12)
+uv venv --python 3.12 venv
+export VIRTUAL_ENV="{hermes_dir}/venv"
+
+# Install hermes with all extras
+uv pip install -e ".[all]" || uv pip install -e "."
+
+# Verify
+"{hermes_dir}/venv/bin/python" -c "from run_agent import AIAgent; print('hermes-agent installed OK')"
+
+echo "Hermes-agent setup complete!"
+"""
+
+        _run_setup_shell_script(
+            setup_dir=setup_dir,
+            script_name=script_name,
+            script_content=script_content,
+            timeout_seconds=900,
+            label="hermes-agent",
+            timeout_error_message="hermes-agent setup timed out after 15 minutes",
+        )
+
+        print(f"Setup directory: {setup_dir}", flush=True)
+        print(f"  - hermes-agent: {hermes_dir}", flush=True)
 
         return setup_dir
 

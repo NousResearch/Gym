@@ -1,0 +1,45 @@
+# SWE-bench wrapper configuration for Hermes
+swe_agents:
+  responses_api_agents:
+    swe_agents:
+      entrypoint: app.py
+
+      # Agent framework configuration
+      agent_framework: hermes
+      agent_max_turns: 30
+
+      # Container configuration (used for SWE-bench eval, not the agent itself)
+      container_formatter: ???
+      swebench_agent_timeout: 1800
+      swebench_tests_timeout: 900
+
+      dataset_path: ???
+
+      # Model server reference
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        # Training dataset
+        - name: train
+          type: train
+          jsonl_fpath: responses_api_agents/swe_agents/data/swegym_for_sweagent_and_openhands.jsonl
+          gitlab_identifier:
+            dataset_name: swegym_for_sweagent_and_openhands
+            version: 0.0.2
+            artifact_fpath: swegym-converted.jsonl
+          license: Apache 2.0
+        # Validation dataset
+        - name: validation
+          type: validation
+          jsonl_fpath: responses_api_agents/swe_agents/data/swebench_verified_for_sweagent_and_openhands.jsonl
+          gitlab_identifier:
+            dataset_name: swebench_verified_for_sweagent_and_openhands
+            version: 0.0.1
+            artifact_fpath: swebench_verified_for_sweagent_and_openhands.jsonl
+          license: TBD
+        # Example dataset for quick testing
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/swe_agents/data/example.jsonl

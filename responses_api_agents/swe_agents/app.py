@@ -49,7 +49,9 @@ from responses_api_agents.swe_agents.utils import (
     extract_input_messages_from_trajectory,
     extract_problem_info,
     get_model_endpoint,
+    run_hermes_swebench_evaluation,
     run_swebench_evaluation,
+    setup_hermes_environment,
     setup_openhands_environment,
     setup_r2e_gym_environment,
     setup_swebench_environment,
@@ -74,7 +76,7 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     # Agent framework configuration
     agent_framework: str = Field(
         default="swe_agent",
-        description="Agent framework to use: swe_agent or openhands",
+        description="Agent framework to use: swe_agent, openhands, or hermes",
     )
     agent_config: Optional[str] = Field(default=None, description="Path to agent configuration file")
     agent_tools_file: Optional[str] = Field(
@@ -105,6 +107,20 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
 
     # Concurrency control
     concurrency: int = Field(default=256, description="Maximum number of concurrent SWE-bench runs")
+
+    # Pre-built hermes-agent directory path (set during initialization)
+    hermes_setup_dir: Optional[Path] = Field(
+        default=None,
+        description="Path to pre-built hermes-agent directory (automatically set during initialization)",
+        exclude=True,
+    )
+
+    # Path to ~/.hermes directory to mount into the container (config, API keys, memory, skills)
+    hermes_home_dir: Optional[str] = Field(
+        default=None,
+        description="Path to ~/.hermes directory. Mounted into the container so config.yaml, .env, memory, "
+        "and skills are available. Defaults to ~/.hermes if not set.",
+    )
 
     # Pre-built OpenHands directory path (set during initialization)
     openhands_setup_dir: Optional[Path] = Field(
@@ -201,16 +217,23 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
 
-        # Pre-build OpenHands environment if using openhands framework
-        if self.config.agent_framework == "openhands":
-            self.config.openhands_setup_dir = setup_openhands_environment(
-                agent_framework_repo=self.config.agent_framework_repo,
-                agent_framework_commit=self.config.agent_framework_commit,
-            )
-        self.config.swebench_setup_dir = setup_swebench_environment()
-        self.config.r2e_gym_setup_dir = setup_r2e_gym_environment()
+        if self.config.agent_framework == "hermes":
+            # Pre-build hermes-agent environment (clones repo, creates venv)
+            self.config.hermes_setup_dir = setup_hermes_environment()
+            self.config.swebench_setup_dir = setup_swebench_environment()
+            self.config.r2e_gym_setup_dir = setup_r2e_gym_environment()
+            print("Hermes + evaluation dependencies set up complete", flush=True)
+        else:
+            # Pre-build OpenHands environment if using openhands framework
+            if self.config.agent_framework == "openhands":
+                self.config.openhands_setup_dir = setup_openhands_environment(
+                    agent_framework_repo=self.config.agent_framework_repo,
+                    agent_framework_commit=self.config.agent_framework_commit,
+                )
+            self.config.swebench_setup_dir = setup_swebench_environment()
+            self.config.r2e_gym_setup_dir = setup_r2e_gym_environment()
 
-        print("Dependencies repositories set up complete", flush=True)
+            print("Dependencies repositories set up complete", flush=True)
 
         self.config.run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         print(f"Run session ID: {self.config.run_session_id}", flush=True)
@@ -284,14 +307,37 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 "command_exec_timeout": self.config.command_exec_timeout,
             }
 
-            if self.config.run_with_mixed_prompts:
-                print(
-                    f"Instance ID: {instance_id}. Random seed: {rng.seed} Agent choice: {prompt_agent_choice['agent_cls']}",
-                    flush=True,
-                )
-                params.update(prompt_agent_choice)
+            if self.config.agent_framework == "hermes":
+                # Hermes uses its own evaluation path
+                hermes_params = {
+                    "problem_info": problem_info,
+                    "model_endpoint": model_endpoint,
+                    "body": body,
+                    "run_session_id": self.config.run_session_id,
+                    "agent_max_turns": self.config.agent_max_turns,
+                    "swebench_tests_timeout": self.config.swebench_tests_timeout,
+                    "swebench_agent_timeout": self.config.swebench_agent_timeout,
+                    "hermes_setup_dir": self.config.hermes_setup_dir,
+                    "hermes_home_dir": Path(self.config.hermes_home_dir) if self.config.hermes_home_dir else Path.home() / ".hermes",
+                    "swebench_setup_dir": self.config.swebench_setup_dir,
+                    "r2e_gym_setup_dir": self.config.r2e_gym_setup_dir,
+                    "dataset_path": self.config.dataset_path,
+                    "instance_dir": instance_dir,
+                    "ray_queue_time": ray_queue_time,
+                    "user_prompt_template": self.config.user_prompt_template,
+                    "system_prompt_template": self.config.system_prompt_template,
+                }
+                future = runner_ray_remote.remote(run_hermes_swebench_evaluation, hermes_params)
+            else:
+                if self.config.run_with_mixed_prompts:
+                    print(
+                        f"Instance ID: {instance_id}. Random seed: {rng.seed} Agent choice: {prompt_agent_choice['agent_cls']}",
+                        flush=True,
+                    )
+                    params.update(prompt_agent_choice)
 
-            future = runner_ray_remote.remote(run_swebench_evaluation, params)
+                future = runner_ray_remote.remote(run_swebench_evaluation, params)
+
             result = await future
 
             # Extract trajectory and convert to proper NeMoGym format
@@ -352,7 +398,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 model=getattr(body, "model", "gpt-4.1-2025-04-14"),
                 object="response",
                 output=output_items,
-                parallel_tool_calls=(False if self.config.agent_framework == "swe_agent" else True),
+                parallel_tool_calls=(True if self.config.agent_framework == "openhands" else False),
                 tool_choice="auto",
                 tools=tools,
                 metadata=metadata,
@@ -414,8 +460,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # This is needed because the pydantic model has non-Optional fields with defaults
 
             update_dict = {}
-            # SWE-agent processes tool calls sequentially, OpenHands can do parallel
-            update_dict["parallel_tool_calls"] = False if self.config.agent_framework == "swe_agent" else True
+            # Only OpenHands does parallel tool calls; SWE-agent and hermes are sequential
+            update_dict["parallel_tool_calls"] = True if self.config.agent_framework == "openhands" else False
             if body.responses_create_params.tool_choice is None:
                 update_dict["tool_choice"] = "auto"
 
