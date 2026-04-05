@@ -136,7 +136,7 @@ def convert_trajectory_to_output_items(
     vllm_converter = VLLMConverter(return_token_id_information=True)
 
     # For OpenHands, trajectory is already in OpenAI format
-    if agent_framework == "openhands" and isinstance(trajectory, list):
+    if agent_framework in ("openhands", "hermes") and isinstance(trajectory, list):
         for item in trajectory:
             if isinstance(item, dict):
                 role = item["role"]
