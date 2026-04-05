@@ -83,14 +83,18 @@ def run(args):
     agent = AIAgent(
         base_url=args.model_base_url,
         model=args.model,
-        api_key="not-needed",
+        api_key="***",
         max_iterations=args.max_turns,
         save_trajectories=True,
+
     )
 
     # Disable context compression for RL training — compression rewrites
     # earlier messages, which invalidates prompt token IDs from those turns.
     agent.compression_enabled = False
+
+    # Temperature is patched into hermes-agent's run_agent.py via SETUP_COMMAND
+    # to match NeMo RL's generation config (vLLM asserts on temperature match).
 
     user_msg = (
         f"Please fix the following issue in the repository at /testbed.\n\n"
@@ -193,22 +197,34 @@ class RunHermesAgent(RunOpenHandsAgent):
     def _get_extra_agent_mounts(self) -> list[str]:
         """Return additional Apptainer mount arguments for hermes agent mode."""
         mounts = []
-        if self.hermes_setup_dir:
-            # Mount hermes-agent setup dir read-only at both /hermes_setup
-            # and its original absolute path (for venv hardcoded paths)
+
+        # Mount the in-container hermes-agent build (/opt/hermes-agent)
+        # and its uv-managed Python so the venv's symlinks resolve.
+        hermes_install = Path("/opt/hermes-agent")
+        if hermes_install.exists():
+            mounts.append(
+                f"--mount type=bind,src={hermes_install},dst={hermes_install},ro"
+            )
+        elif self.hermes_setup_dir:
             mounts.append(
                 f"--mount type=bind,src={self.hermes_setup_dir},dst=/hermes_setup,ro"
             )
             mounts.append(
                 f"--mount type=bind,src={self.hermes_setup_dir},dst={self.hermes_setup_dir},ro"
             )
-            # The venv's python is a symlink chain into uv's managed Python dir.
-            # Mount the entire uv python directory so all symlinks resolve.
-            uv_python_dir = Path.home() / ".local" / "share" / "uv" / "python"
-            if uv_python_dir.exists():
-                mounts.append(
-                    f"--mount type=bind,src={uv_python_dir},dst={uv_python_dir},ro"
-                )
+
+        # Mount the uv-managed Python directory so venv symlinks resolve
+        uv_python_dir = Path("/root/.local/share/uv/python")
+        if uv_python_dir.exists():
+            mounts.append(
+                f"--mount type=bind,src={uv_python_dir},dst={uv_python_dir},ro"
+            )
+        # Fallback: check home-relative path
+        uv_python_dir2 = Path.home() / ".local" / "share" / "uv" / "python"
+        if uv_python_dir2.exists() and uv_python_dir2 != uv_python_dir:
+            mounts.append(
+                f"--mount type=bind,src={uv_python_dir2},dst={uv_python_dir2},ro"
+            )
         if self.hermes_home_dir:
             # Mount the user's ~/.hermes into the container so config.yaml,
             # .env (API keys), memory, and skills are all available.
@@ -274,7 +290,7 @@ class RunHermesAgent(RunOpenHandsAgent):
         mount_str = " ".join(mount_args)
 
         apptainer_cmd = (
-            f"apptainer exec --writable-tmpfs --cleanenv --pid --no-mount home,tmp,bind-paths "
+            f"apptainer exec --writable-tmpfs --cleanenv --no-mount home,tmp,bind-paths "
             f"{mount_str} "
             f" {container_name} bash -c {_shlex.quote(combined_command)}"
         )
@@ -354,13 +370,15 @@ class RunHermesAgent(RunOpenHandsAgent):
 
         output_filename = f"{data_point['instance_id']}.jsonl"
 
+        # hermes-agent is built at /opt/hermes-agent inside the NeMo RL container
+        # (via SETUP_COMMAND). We mount it into the SWE-bench Apptainer container
+        # along with the uv-managed Python so the venv resolves correctly.
+        hermes_install = "/opt/hermes-agent"
+
         hermes_cmd = (
-            # cd to /testbed so context file auto-injection (AGENTS.md etc.)
-            # scans the target repo, not hermes's source tree.
-            # PYTHONPATH ensures hermes imports still work.
             f"cd /testbed && "
-            f"PYTHONPATH=/hermes_setup/hermes-agent "
-            f"/hermes_setup/hermes-agent/venv/bin/python "
+            f"PYTHONPATH={hermes_install} "
+            f"{hermes_install}/venv/bin/python "
             f"/trajectories_mount/hermes_runner.py "
             f"    --model-base-url {shlex.quote(api_base)} "
             f"    --model {shlex.quote(self.cfg.server['model'])} "

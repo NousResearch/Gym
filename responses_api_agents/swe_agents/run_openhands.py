@@ -670,7 +670,7 @@ class RunOpenHandsAgent:
 
         # Launch Apptainer container and execute the command
         apptainer_cmd = (
-            f"apptainer exec --writable-tmpfs --cleanenv --pid --no-mount home,tmp,bind-paths "
+            f"apptainer exec --writable-tmpfs --cleanenv --no-mount home,tmp,bind-paths "
             f"{mount_str} "
             f" {container_name} bash -c {shlex.quote(combined_command)}"
         )
