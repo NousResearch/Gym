@@ -1,2 +1,4 @@
 -e nemo-gym[dev] @ ../../
 tomlkit==0.13.3
+protobuf
+grpcio
