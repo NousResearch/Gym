@@ -173,8 +173,12 @@ def convert_trajectory_to_output_items(
                     generation_token_ids = item.get("generation_token_ids", [])
                     generation_log_probs = item.get("generation_log_probs", [])
 
-                    # extract reasoning content
-                    reasoning_matches, text_content = vllm_converter._extract_reasoning_from_content(text_content)
+                    # extract reasoning content (skip for hermes — it uses
+                    # uses_reasoning_parser=false so <think> stays inline
+                    # and token IDs remain contiguous across turns)
+                    reasoning_matches = []
+                    if agent_framework != "hermes":
+                        reasoning_matches, text_content = vllm_converter._extract_reasoning_from_content(text_content)
                     if reasoning_matches:
                         reasoning_item = NeMoGymResponseReasoningItem(
                             id=f"rs_{uuid4().hex}",
