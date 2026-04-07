@@ -595,11 +595,9 @@ repr(e): {repr(e)}"""
 
         @app.exception_handler(RequestValidationError)
         async def validation_exception_handler(request: Request, exc):
-            print(
-                f"""Hit validation exception! Errors: {json.dumps(exc.errors(), indent=4)}
-Full body: {json.dumps(exc.body, indent=4)}
-"""
-            )
+            # Truncate body to avoid massive log output (hermes tools are ~30KB per request)
+            body_str = json.dumps(exc.body)
+            print(f"Hit validation exception! Errors: {json.dumps(exc.errors())}\nBody length: {len(body_str)} chars")
             return await request_validation_exception_handler(request, exc)
 
         profiling_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)
