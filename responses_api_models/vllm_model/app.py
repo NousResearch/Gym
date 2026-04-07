@@ -530,9 +530,16 @@ class VLLMModel(SimpleResponsesAPIModel):
                     [reasoning_content]
                 ) + (choice_dict["message"]["content"] or "")
         else:
-            assert not choice_dict["message"].get("reasoning_content"), (
-                "Please do not use a reasoning parser in vLLM! There is one source of truth for handling data (including reasoning), which is NeMo Gym!"
-            )
+            # When uses_reasoning_parser is false, we don't extract <think> from
+            # request content. But vLLM with enable_thinking=true still returns
+            # reasoning_content separate from content. Merge it back inline so
+            # the content matches the original generation token IDs exactly.
+            reasoning_content = choice_dict["message"].pop("reasoning_content", None)
+            if reasoning_content is not None:
+                choice_dict["message"]["content"] = (
+                    "<think>\n" + reasoning_content + "</think>\n" +
+                    (choice_dict["message"]["content"] or "")
+                )
 
         if self.config.return_token_id_information:
             log_probs = choice_dict["logprobs"]["content"]
