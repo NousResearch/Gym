@@ -86,15 +86,14 @@ def run(args):
         api_key="***",
         max_iterations=args.max_turns,
         save_trajectories=True,
-
+        use_streaming=False,
+        temperature=1.0,
+        insert_reasoning=False,
     )
 
     # Disable context compression for RL training — compression rewrites
     # earlier messages, which invalidates prompt token IDs from those turns.
     agent.compression_enabled = False
-
-    # Temperature is patched into hermes-agent's run_agent.py via SETUP_COMMAND
-    # to match NeMo RL's generation config (vLLM asserts on temperature match).
 
     user_msg = (
         f"Please fix the following issue in the repository at /testbed.\n\n"
