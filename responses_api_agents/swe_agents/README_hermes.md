@@ -1,87 +1,57 @@
-# Hermes Agent SWE-RL Training
+# Hermes Agent SWE-bench Rollouts
 
-Runs hermes-agent as a SWE-bench agent framework inside Apptainer/Singularity
-containers for NeMo RL GRPO training. Replaces the OpenHands rollout in the
-Stage 2 pipeline with hermes-agent so we train on the full hermes toolset
-(terminal, file ops, search, patch, etc.) and capture per-turn token IDs +
-logprobs for RL.
+Runs hermes-agent as the SWE-bench agent framework inside Apptainer
+containers, mirroring the OpenHands / SWE-agent flow in the base README but
+driving the full hermes toolset (terminal, file ops, search, patch, etc.).
+Per-turn token IDs and logprobs from the model are captured in the
+trajectory, which makes this the path used for RL training data collection.
+
+See the base README in this directory for the general SWE-agent setup
+(apptainer install, env.yaml, vLLM serving, ng_run / ng_collect_rollouts).
+This doc only covers the hermes-specific bits.
 
 ## Architecture
 
 ```
-NeMo RL (GRPO training loop)  -- launched by super_launch.sh -> ray.sub
-  Megatron policy (EP=8, CP=8, TP=1)
-  vLLM inference workers (TP=2, async engine, qwen3_coder tool parser,
-                          nano_v3 reasoning parser, enable_thinking=true)
-        NeMo Gym VLLMModel proxy (adds token IDs + logprobs)
-  NeMo Gym rollout collection
-        SWE agents server (swebench_hermes_training.yaml)
-              RunHermesAgent  -> Apptainer SWE-bench container
-                    /testbed            -- repo at base_commit
-                    /opt/hermes-agent   -- baked into the SIF
-                    hermes_runner.py    -- AIAgent.run_conversation()
-                          git diff -> SWE-bench eval -> binary reward
+ng_run / ng_collect_rollouts
+  SWE agents server (swebench_hermes.yaml or swebench_hermes_training.yaml)
+    RunHermesAgent  -> Apptainer SWE-bench container
+          /testbed            -- repo at base_commit
+          /opt/hermes-agent   -- baked into the SIF
+          hermes_runner.py    -- AIAgent.run_conversation()
+                git diff -> SWE-bench eval -> reward
 ```
-
-Cluster layout is config-driven (`cluster.num_nodes`, `policy.generation.colocated`,
-etc). The Stage 2 Nano config currently ships as 12 nodes, non-colocated.
 
 ## Components
 
-### Gym (this repo)
-
-- `run_hermes.py` -- `RunHermesAgent`, a subclass of `RunOpenHandsAgent`. Writes
-  `HERMES_RUNNER_SCRIPT` into the rollout output dir and invokes
+- `run_hermes.py` -- `RunHermesAgent`, a subclass of `RunOpenHandsAgent`.
+  Writes `HERMES_RUNNER_SCRIPT` into the rollout output dir and invokes
   `/opt/hermes-agent/venv/bin/python hermes_runner.py ...` against `/testbed`
-  inside each SWE-bench SIF.
-  AIAgent is instantiated with `use_streaming=False`, `temperature=1.0`,
-  `insert_reasoning=False`, and context compression disabled -- all required for
-  prompt/generation token-ID contiguity across turns.
-- `configs/swebench_hermes_training.yaml` -- train/val server config (framework
-  = hermes, dataset registrations, defaults). Most per-run knobs (concurrency,
-  agent_max_turns, swebench_agent_timeout, container_formatter) are overridden
-  from the RL-side config via the `env.nemo_gym.swe_agents_{train,val}` block,
-  so the values in this YAML are just the defaults.
-
-### RL repo
-
-- `super_launch.sh` -- main entry point. Takes EXP_NAME / TRAIN_PATH / VAL_PATH
-  / CONFIG_PATH / MODEL_PATH / CONTAINER / SANDBOX_CONTAINER / PERSISTENT_CACHE
-  / SLURM_PARTITION / SLURM_ACCOUNT as required env vars, snapshots the code,
-  wires up caches and mounts, reads `cluster.num_nodes` from the config, and
-  submits `ray.sub` via sbatch. Optional: `SIF_DIR` (forwarded as
-  `sif_dir=...` to the training CLI), `EXTRA_MOUNTS`, `SLURM_TIME_LIMIT`,
-  `DRY_RUN=true`.
-- `examples/configs/super/stage2_hermes_nano_8node.yaml` -- Stage 2 GRPO config
-  for Nemotron 3 Nano 30B-A3B with hermes agent. (Name says 8node but
-  `cluster.num_nodes: 12`; rename if it bugs you.) Wires the Gym configs via
-  `env.nemo_gym.config_paths` and applies the RL-side overrides.
-- `nemo_rl/models/generation/vllm/vllm_worker_async.py` -- overrides
-  `request.temperature` / `request.top_p` to match generation config before
-  serving (hermes requests can drift and vLLM would otherwise assert).
+  inside each SWE-bench SIF. AIAgent is instantiated with
+  `use_streaming=False`, `temperature=1.0`, `insert_reasoning=False`, and
+  context compression disabled -- needed for prompt/generation token-ID
+  contiguity across turns.
+- `configs/swebench_hermes.yaml` -- standalone eval / rollout config.
+- `configs/swebench_hermes_training.yaml` -- training-data-collection
+  variant (framework = hermes, train + validation dataset registrations).
 
 ## Prerequisites
 
-- Container: whichever NeMo RL image you pass as `CONTAINER` in
-  `super_launch.sh`. It must have the vLLM tool-parser plugins in use
-  (`qwen3_coder`, `nano_v3`).
-- Model: `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` (instruct; ships the
-  `<tool_call>` chat template with thinking support).
-- SIF images: per-instance Apptainer `.sif` files for SWE-bench.
-  Download via `./examples/nemo_gym/download_swe_images.py --sif-dir $SIF_DIR`.
-  The stage2 config resolves them with a three-way `container_formatter`
-  fallback: `swegym_sweb.eval.x86_64.{id}.sif`,
-  `swebench_sweb.eval.x86_64.{id}.sif`, `r2egym_{id}.sif`.
-- Data: JSONL rollout inputs (see below).
-- `hermes-agent` pre-installed at `/opt/hermes-agent` inside each SWE-bench SIF
-  (see Installing hermes-agent below).
+In addition to the base README prerequisites:
+
+- Model served via vLLM (or OpenAI-compatible) with a tool parser. For
+  Nemotron-3 Nano / similar NV models: `--tool-call-parser qwen3_coder` and
+  the `nano_v3` reasoning parser. For Qwen3 Coder: `--tool-call-parser
+  qwen3_coder`. See the base README for a sample `vllm serve` invocation.
+- SIF images with `hermes-agent` pre-installed at `/opt/hermes-agent`
+  (see below).
 
 ## Installing hermes-agent into the SIFs
 
 `RunHermesAgent` runs `/opt/hermes-agent/venv/bin/python hermes_runner.py`
 inside each SWE-bench SIF. hermes-agent has to be baked into each SIF
 directly: `apptainer build --sandbox`, install into `/opt/hermes-agent`,
-rebuild. Core of the per-SIF loop (sharded across a Slurm array):
+rebuild. Core of the per-SIF loop:
 
 ```bash
 HERMES_BRANCH=nemo-gym-changes
@@ -115,18 +85,33 @@ mv "$NEW_SIF" "$SIF_PATH"
 Python venv at `/opt/hermes-agent/venv`, so the rebuilt SIF needs no host
 mounts at runtime.
 
-Wrap this in a sharded Slurm array (`SLURM_ARRAY_TASK_ID` -> slice of the SIF
-list), use `.done` marker files so re-runs resume where you left off, and
-run several SIFs per task in parallel since the install is mostly network +
-I/O bound.
+For large SIF sets, wrap this in a sharded Slurm array
+(`SLURM_ARRAY_TASK_ID` -> slice of the SIF list), use `.done` marker files
+so re-runs resume where you left off, and run several SIFs per task in
+parallel since the install is mostly network + I/O bound.
 
 To tweak the installed hermes-agent across all SIFs later (e.g. a source
 patch), use the same sandbox -> edit `/opt/hermes-agent/run_agent.py` ->
 rebuild SIF pattern.
 
+## Run
+
+Same as the base README, but point at the hermes config:
+
+```bash
+config_paths="responses_api_agents/swe_agents/configs/swebench_hermes.yaml,\
+responses_api_models/vllm_model/configs/vllm_model.yaml"
+
+ng_run "+config_paths=[$config_paths]" \
+    +swe_agents.responses_api_agents.swe_agents.container_formatter=/path/to/sif/swebench_sweb.eval.x86_64.\{instance_id\}.sif
+```
+
+For batch rollout collection, use `ng_collect_rollouts +agent_name=swe_agents
+...` exactly as in the base README.
+
 ## Data format
 
-Each JSONL line:
+Standard SWE-bench rollout JSONL with the hermes agent wired in:
 
 ```json
 {
@@ -149,48 +134,16 @@ Each JSONL line:
 Notes:
 
 - `agent_ref.name` is the top-level server key in the config
-  (`swe_agents_train` or `swe_agents_val`), not the dataset name.
+  (`swe_agents_train` / `swe_agents_val`), not the dataset name.
 - `metadata.instance_dict` is a JSON string of the SWE-bench instance row.
 - `input` must contain at least one user message.
-- `model` must match the served vLLM model name exactly.
-
-## RL-side overrides that actually run
-
-`stage2_hermes_nano_8node.yaml` overrides the Gym defaults in
-`swebench_hermes_training.yaml`. Values used at runtime:
-
-- `agent_max_turns: 200`
-- `concurrency: 256`
-- `swebench_agent_timeout: 3600`
-- `run_with_mixed_prompts: true` (train only)
-- `dataset_path` is pinned from `data.{train,validation}.data_path`
-- `container_formatter` is the three-way fallback list above
-
-If something looks off at runtime, diff against the RL config, not the Gym YAML.
-
-## Launch
-
-```bash
-EXP_NAME=hermes-nano-stage2 \
-TRAIN_PATH=/path/to/swegym_train.jsonl \
-VAL_PATH=/path/to/swebench_verified_val.jsonl \
-CONFIG_PATH=examples/configs/super/stage2_hermes_nano_8node.yaml \
-MODEL_PATH=/path/to/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
-CONTAINER=<nemo-rl image> \
-SANDBOX_CONTAINER=<nemo-skills sandbox sif> \
-PERSISTENT_CACHE=/path/to/cache \
-SIF_DIR=/path/to/sif \
-SLURM_PARTITION=<...> SLURM_ACCOUNT=<...> \
-bash super_launch.sh
-```
-
-`super_launch.sh` snapshots the code, reads `cluster.num_nodes` from the
-config, and submits `ray.sub`. Set `DRY_RUN=true` to print the sbatch
-invocation without submitting.
+- `model` must match the served model name exactly.
 
 ## Trajectory output
 
-Each rollout emits a trajectory with per-turn token IDs and logprobs:
+Each rollout emits a trajectory with per-turn token IDs and logprobs
+(courtesy of the NeMo Gym VLLMModel proxy with
+`return_token_id_information: true`):
 
 ```
 [0] system  -- persona + SWE prompt
@@ -201,19 +154,14 @@ Each rollout emits a trajectory with per-turn token IDs and logprobs:
 ...
 ```
 
-Token IDs are injected by the NeMo Gym VLLMModel proxy
-(`return_token_id_information: true`).
-
-## Known issues / gotchas
+## Gotchas
 
 - Context compression must stay disabled in `hermes_runner.py`; enabling it
-  rewrites earlier messages and invalidates prompt token IDs from prior turns.
-- `apptainer exec --pid` breaks in nested containers (Pyxis -> Apptainer) and
-  is omitted in both `run_openhands.py` and `run_hermes.py`.
-- vLLM worker overrides `request.temperature` / `request.top_p` to match
-  generation config; keep that override (see `vllm_worker_async.py` lines
-  around the `generation_config` block).
-- Data's `model` field must match the vLLM served model name exactly, or the
+  rewrites earlier messages and invalidates prompt token IDs from prior
+  turns, which breaks RL use downstream.
+- `apptainer exec --pid` breaks in nested containers (Pyxis -> Apptainer)
+  and is omitted in both `run_openhands.py` and `run_hermes.py`.
+- The data's `model` field must match the served model name exactly or the
   proxy rejects requests.
-- `container_formatter` fallbacks are tried in order; if an instance isn't in
-  any of swegym / swebench / r2egym SIF dirs it will fail to find a container.
+- `container_formatter` can be a list; fallbacks are tried in order. If an
+  instance isn't found under any pattern the rollout will fail.
