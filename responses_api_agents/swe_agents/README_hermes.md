@@ -66,8 +66,7 @@ etc). The Stage 2 Nano config currently ships as 12 nodes, non-colocated.
   `super_launch.sh`. It must have the vLLM tool-parser plugins in use
   (`qwen3_coder`, `nano_v3`).
 - Model: `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` (instruct; ships the
-  `<tool_call>` chat template with thinking support). The stage2 config points
-  at `/home/dakota/hermes-swe-rl/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`.
+  `<tool_call>` chat template with thinking support).
 - SIF images: per-instance Apptainer `.sif` files for SWE-bench.
   Download via `./examples/nemo_gym/download_swe_images.py --sif-dir $SIF_DIR`.
   The stage2 config resolves them with a three-way `container_formatter`
@@ -80,27 +79,50 @@ etc). The Stage 2 Nano config currently ships as 12 nodes, non-colocated.
 ## Installing hermes-agent into the SIFs
 
 `RunHermesAgent` runs `/opt/hermes-agent/venv/bin/python hermes_runner.py`
-inside each SWE-bench SIF. hermes-agent is baked into each SIF directly via
-`apptainer build --sandbox` + install + rebuild.
+inside each SWE-bench SIF. hermes-agent has to be baked into each SIF
+directly: `apptainer build --sandbox`, install into `/opt/hermes-agent`,
+rebuild. Core of the per-SIF loop (sharded across a Slurm array):
 
-`~/hermes-swe-rl/rebuild_sifs_with_hermes.sh` does this as a sharded Slurm
-array job over the whole SIF set. For each SIF it:
+```bash
+HERMES_BRANCH=nemo-gym-changes
+HERMES_REPO=https://github.com/NousResearch/hermes-agent.git
 
-1. `apptainer build --sandbox` the SIF into a writable dir
-2. Inside the sandbox: `git clone --branch nemo-gym-changes
-   https://github.com/NousResearch/hermes-agent.git /opt/hermes-agent` and
-   `HERMES_INSTALL_DIR=/opt/hermes-agent bash ./scripts/install.sh
-   --skip-setup --branch nemo-gym-changes`
-3. Verify the venv imports AIAgent, rebuild the SIF, overwrite the original
+# 1. unpack the SIF into a writable sandbox
+apptainer build --sandbox "$SANDBOX" "$SIF_PATH"
 
-Each rebuilt SIF is self-contained: `/opt/hermes-agent` ships its own Python
-venv. Progress is tracked via `.done` marker files in
-`~/hermes-swe-rl/sif_rebuild_done/`; re-running the array resumes where it
-left off.
+# 2. clone + install hermes-agent at /opt/hermes-agent (writes its own venv)
+apptainer exec --writable --no-mount home "$SANDBOX" bash -c "
+    set -e
+    rm -rf /opt/hermes-agent
+    cd /opt
+    git clone --branch $HERMES_BRANCH $HERMES_REPO hermes-agent
+    cd hermes-agent
+    HERMES_INSTALL_DIR=/opt/hermes-agent \
+      bash ./scripts/install.sh --skip-setup --branch $HERMES_BRANCH
+"
 
-To tweak the installed hermes-agent across all SIFs (e.g. a source patch),
-follow the pattern in `patch_sifs_length_fix.sh`: sandbox -> edit
-`/opt/hermes-agent/run_agent.py` -> rebuild SIF.
+# 3. repack to a new SIF and verify the venv imports AIAgent
+apptainer build "$NEW_SIF" "$SANDBOX"
+apptainer exec --no-mount home "$NEW_SIF" \
+    /opt/hermes-agent/venv/bin/python -c \
+    'from run_agent import AIAgent; print("OK")'
+
+# 4. swap the new SIF in for the old one
+mv "$NEW_SIF" "$SIF_PATH"
+```
+
+`hermes-agent/scripts/install.sh --skip-setup` produces a self-contained
+Python venv at `/opt/hermes-agent/venv`, so the rebuilt SIF needs no host
+mounts at runtime.
+
+Wrap this in a sharded Slurm array (`SLURM_ARRAY_TASK_ID` -> slice of the SIF
+list), use `.done` marker files so re-runs resume where you left off, and
+run several SIFs per task in parallel since the install is mostly network +
+I/O bound.
+
+To tweak the installed hermes-agent across all SIFs later (e.g. a source
+patch), use the same sandbox -> edit `/opt/hermes-agent/run_agent.py` ->
+rebuild SIF pattern.
 
 ## Data format
 
@@ -149,16 +171,15 @@ If something looks off at runtime, diff against the RL config, not the Gym YAML.
 ## Launch
 
 ```bash
-cd ~/github/RL
 EXP_NAME=hermes-nano-stage2 \
-TRAIN_PATH=/home/dakota/hermes-swe-rl/data/swegym_train.jsonl \
-VAL_PATH=/home/dakota/hermes-swe-rl/data/swebench_verified_val.jsonl \
+TRAIN_PATH=/path/to/swegym_train.jsonl \
+VAL_PATH=/path/to/swebench_verified_val.jsonl \
 CONFIG_PATH=examples/configs/super/stage2_hermes_nano_8node.yaml \
-MODEL_PATH=/home/dakota/hermes-swe-rl/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
-CONTAINER=<nemo-rl image with hermes-agent reachable at /opt/hermes-agent> \
+MODEL_PATH=/path/to/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+CONTAINER=<nemo-rl image> \
 SANDBOX_CONTAINER=<nemo-skills sandbox sif> \
-PERSISTENT_CACHE=/home/dakota/hermes-swe-rl/cache \
-SIF_DIR=/home/dakota/hermes-swe-rl/sif \
+PERSISTENT_CACHE=/path/to/cache \
+SIF_DIR=/path/to/sif \
 SLURM_PARTITION=<...> SLURM_ACCOUNT=<...> \
 bash super_launch.sh
 ```
