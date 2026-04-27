@@ -18,7 +18,7 @@ NeMo RL (GRPO training loop)  -- launched by super_launch.sh -> ray.sub
         SWE agents server (swebench_hermes_training.yaml)
               RunHermesAgent  -> Apptainer SWE-bench container
                     /testbed            -- repo at base_commit
-                    /opt/hermes-agent   -- bind-mounted into the SIF
+                    /opt/hermes-agent   -- baked into the SIF
                     hermes_runner.py    -- AIAgent.run_conversation()
                           git diff -> SWE-bench eval -> binary reward
 ```
@@ -31,9 +31,9 @@ etc). The Stage 2 Nano config currently ships as 12 nodes, non-colocated.
 ### Gym (this repo)
 
 - `run_hermes.py` -- `RunHermesAgent`, a subclass of `RunOpenHandsAgent`. Writes
-  `HERMES_RUNNER_SCRIPT` into the rollout output dir, bind-mounts it plus
-  `/opt/hermes-agent` into each SWE-bench SIF, and invokes
-  `/opt/hermes-agent/venv/bin/python hermes_runner.py ...` against `/testbed`.
+  `HERMES_RUNNER_SCRIPT` into the rollout output dir and invokes
+  `/opt/hermes-agent/venv/bin/python hermes_runner.py ...` against `/testbed`
+  inside each SWE-bench SIF.
   AIAgent is instantiated with `use_streaming=False`, `temperature=1.0`,
   `insert_reasoning=False`, and context compression disabled -- all required for
   prompt/generation token-ID contiguity across turns.
@@ -74,40 +74,33 @@ etc). The Stage 2 Nano config currently ships as 12 nodes, non-colocated.
   fallback: `swegym_sweb.eval.x86_64.{id}.sif`,
   `swebench_sweb.eval.x86_64.{id}.sif`, `r2egym_{id}.sif`.
 - Data: JSONL rollout inputs (see below).
-- `hermes-agent` installed at `/opt/hermes-agent` inside the NeMo RL container
-  (or bind-mounted there -- see Installing hermes-agent below).
+- `hermes-agent` pre-installed at `/opt/hermes-agent` inside each SWE-bench SIF
+  (see Installing hermes-agent below).
 
-## Installing hermes-agent into the container
+## Installing hermes-agent into the SIFs
 
 `RunHermesAgent` runs `/opt/hermes-agent/venv/bin/python hermes_runner.py`
-inside each SWE-bench SIF. That path must resolve, so hermes-agent has to be
-available at `/opt/hermes-agent` one way or another:
+inside each SWE-bench SIF. hermes-agent is baked into each SIF directly via
+`apptainer build --sandbox` + install + rebuild.
 
-1. Bake it into the NeMo RL image (clone + `uv venv` + `uv pip install -e .[all]`
-   at `/opt/hermes-agent`), or
-2. Prebuild onto shared NFS and bind-mount into the NeMo RL container as
-   `/opt/hermes-agent`, then let Gym forward the bind-mount into each SIF.
-   `~/hermes-swe-rl/build_hermes_agent.sh` does this today (sbatch once to
-   produce `/home/dakota/hermes-swe-rl/hermes-agent-install/hermes-agent/`
-   with a Python 3.12 venv).
+`~/hermes-swe-rl/rebuild_sifs_with_hermes.sh` does this as a sharded Slurm
+array job over the whole SIF set. For each SIF it:
 
-Either way, the install must include:
+1. `apptainer build --sandbox` the SIF into a writable dir
+2. Inside the sandbox: `git clone --branch nemo-gym-changes
+   https://github.com/NousResearch/hermes-agent.git /opt/hermes-agent` and
+   `HERMES_INSTALL_DIR=/opt/hermes-agent bash ./scripts/install.sh
+   --skip-setup --branch nemo-gym-changes`
+3. Verify the venv imports AIAgent, rebuild the SIF, overwrite the original
 
-- branch `nemo-gym-changes` of `NousResearch/hermes-agent`
-- a Python 3.12 venv at `/opt/hermes-agent/venv`
-- `.[all]` extras installed
+Each rebuilt SIF is self-contained: `/opt/hermes-agent` ships its own Python
+venv. Progress is tracked via `.done` marker files in
+`~/hermes-swe-rl/sif_rebuild_done/`; re-running the array resumes where it
+left off.
 
-The uv-managed Python dir (`/root/.local/share/uv/python` or
-`~/.local/share/uv/python`) also needs to be reachable from inside the SWE-bench
-SIF so the venv symlinks resolve. `RunHermesAgent._get_extra_agent_mounts()`
-bind-mounts both `/opt/hermes-agent` and the uv Python dir automatically if
-present; for option (2) you just have to make sure they're mounted into the
-NeMo RL container first (`super_launch.sh` EXTRA_MOUNTS, or baked in).
-
-The temperature / reasoning_content / streaming monkey-patches in
-`build_hermes_agent.sh` predate `run_hermes.py` passing those kwargs to
-AIAgent directly and can probably be dropped; they're idempotent so leaving
-them in is harmless.
+To tweak the installed hermes-agent across all SIFs (e.g. a source patch),
+follow the pattern in `patch_sifs_length_fix.sh`: sandbox -> edit
+`/opt/hermes-agent/run_agent.py` -> rebuild SIF.
 
 ## Data format
 
