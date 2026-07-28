@@ -8,6 +8,17 @@ persistent task environment, step gating, and per-step verification. Gym
 preserves the ordered checkpoint instructions/trajectories and reports both the
 aggregate Harbor reward and per-checkpoint reach/reward diagnostics.
 
+### Harbor dependency pin
+
+`requirements.txt` deliberately pins the Hermes-focused `39eee01` line of
+`NousResearch/harbor-fork`. Relative to the previously pinned, divergent
+`60d4374` line, it adds the custom OpenAI-compatible endpoint support and Hermes
+installer controls required by this adapter. It does not contain that sibling
+line's Daytona network-policy, sandbox-v2, compileable-task-eval, or Beam
+provider changes; the Hermes multi-step path documented here does not use those
+features. Reconcile the two Harbor lines before enabling those features through
+this adapter.
+
 ## Table of Contents
 
 - [Overview](#overview)

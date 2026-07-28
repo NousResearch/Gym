@@ -636,7 +636,14 @@ class HarborAgent(SimpleResponsesAPIAgent):
             datasets=[dataset_config],
         )
 
-        return job_config.model_dump(mode="json")
+        # This dump is an in-memory transport across the Ray boundary, not a
+        # persistence/logging boundary. Preserve credentials here so the
+        # reconstructed JobConfig receives the values the caller supplied;
+        # Harbor still redacts sensitive env values when it persists artifacts.
+        return job_config.model_dump(
+            mode="json",
+            context={"redact_sensitive_env": False},
+        )
 
 
 if __name__ == "__main__":
