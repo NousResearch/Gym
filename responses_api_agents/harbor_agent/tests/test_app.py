@@ -273,6 +273,8 @@ _GLOBAL_CONFIG = {
 def _harbor_run_mocks(
     trial_result: Optional[Dict[str, Any]] = None,
     trajectory: Optional[Dict[str, Any]] = None,
+    step_trajectories: Optional[Dict[str, Dict[str, Any]]] = None,
+    step_error_flags: Optional[Dict[str, Dict[str, bool]]] = None,
     side_effect: Optional[Exception] = None,
 ):
     """Patch external deps and wire up mocks for HarborAgent.run()."""
@@ -294,6 +296,14 @@ def _harbor_run_mocks(
                 agent_dir = Path(trial_dir) / "agent"
                 agent_dir.mkdir(parents=True, exist_ok=True)
                 (agent_dir / "trajectory.json").write_text(json.dumps(trajectory))
+            for step_name, step_trajectory in (step_trajectories or {}).items():
+                agent_dir = Path(trial_dir) / "steps" / step_name / "agent"
+                agent_dir.mkdir(parents=True, exist_ok=True)
+                (agent_dir / "trajectory.json").write_text(json.dumps(step_trajectory))
+            for step_name, flags in (step_error_flags or {}).items():
+                agent_dir = Path(trial_dir) / "steps" / step_name / "agent"
+                agent_dir.mkdir(parents=True, exist_ok=True)
+                (agent_dir / "agent_error_flags.json").write_text(json.dumps(flags))
             mock_to_thread.return_value = trial_dir
 
         yield
@@ -330,6 +340,51 @@ class TestApp:
 
         assert result.agent_metrics["mean/reward"] == 0.5
         assert result.key_metrics["mean/reward"] == 0.5
+
+    async def test_aggregate_metrics_includes_multi_step_diagnostics(self):
+        server = _make_server()
+        request = AggregateMetricsRequest(
+            verify_responses=[
+                {
+                    "reward": 0.5,
+                    "_ng_task_index": 0,
+                    "_ng_rollout_index": 0,
+                    "metadata": {
+                        "step_results": [
+                            {
+                                "step_name": "checkpoint1",
+                                "verifier_result": {"rewards": {"strict": 1.0}},
+                            },
+                            {
+                                "step_name": "checkpoint2",
+                                "verifier_result": {"rewards": {"strict": 0.0}},
+                            },
+                        ]
+                    },
+                },
+                {
+                    "reward": 0.0,
+                    "_ng_task_index": 0,
+                    "_ng_rollout_index": 1,
+                    "metadata": {
+                        "step_results": [
+                            {
+                                "step_name": "checkpoint1",
+                                "verifier_result": {"rewards": {"strict": 0.0}},
+                            }
+                        ]
+                    },
+                },
+            ]
+        )
+        result = await server.aggregate_metrics(request)
+
+        assert result.agent_metrics["mean/reward"] == 0.25
+        assert result.agent_metrics["step/checkpoint1/reached_rate"] == 1.0
+        assert result.agent_metrics["step/checkpoint1/mean_when_reached/strict"] == 0.5
+        assert result.agent_metrics["step/checkpoint2/reached_rate"] == 0.5
+        assert result.agent_metrics["step/checkpoint2/mean_when_reached/strict"] == 0.0
+        assert result.key_metrics["step/checkpoint2/reached_rate"] == 0.5
 
     async def test_run_with_token_details(self):
         server = _make_server()
@@ -418,6 +473,84 @@ class TestApp:
         assert "prompt_token_ids" not in out[0]
         assert "I will look at foo.py" in out[0]["content"][0]["text"]
         assert response.response.usage.total_tokens == 1380
+
+    async def test_run_multi_step_preserves_order_rewards_and_usage(self):
+        checkpoint1 = _make_trajectory(
+            steps=[
+                _make_step_user(1, "Build the initial application."),
+                _make_step_agent(
+                    2,
+                    "Implemented checkpoint one.",
+                    prompt_token_ids=[1],
+                    completion_token_ids=[2],
+                    logprobs=[-0.1],
+                ),
+            ],
+            total_prompt=100,
+            total_completion=20,
+        )
+        checkpoint2 = _make_trajectory(
+            steps=[
+                _make_step_user(1, "Extend it with the new requirement."),
+                _make_step_agent(
+                    2,
+                    "Implemented checkpoint two.",
+                    prompt_token_ids=[3],
+                    completion_token_ids=[4],
+                    logprobs=[-0.2],
+                ),
+            ],
+            total_prompt=150,
+            total_completion=30,
+        )
+        trial_result = {
+            **DEFAULT_TRIAL_RESULT,
+            "agent_result": None,
+            "verifier_result": {"rewards": {"reward": 0.5}},
+            "step_results": [
+                {
+                    "step_name": "checkpoint1",
+                    "verifier_result": {"rewards": {"reward": 1.0}},
+                },
+                {
+                    "step_name": "checkpoint2",
+                    "verifier_result": {"rewards": {"reward": 0.0}},
+                },
+            ],
+        }
+
+        server = _make_server()
+        with _harbor_run_mocks(
+            trial_result=trial_result,
+            # A stale top-level file must not duplicate modern per-step output.
+            trajectory=DEFAULT_TRAJECTORY,
+            step_trajectories={
+                "checkpoint1": checkpoint1,
+                "checkpoint2": checkpoint2,
+            },
+            step_error_flags={
+                "checkpoint1": {"context_length_exceeded": False},
+                "checkpoint2": {"context_length_exceeded": True},
+            },
+        ):
+            response = await server.run(_make_run_request())
+
+        assert response.reward == 0.5
+        assert [message.content for message in response.responses_create_params.input] == [
+            "Build the initial application.",
+            "Extend it with the new requirement.",
+        ]
+        assistant_texts = [item.content[0].text for item in response.response.output if item.type == "message"]
+        assert assistant_texts == [
+            "Implemented checkpoint one.",
+            "Implemented checkpoint two.",
+        ]
+        assert response.response.usage.total_tokens == 300
+        assert response.context_length_exceeded_error == 1
+        assert [step["step_name"] for step in response.metadata["step_results"]] == [
+            "checkpoint1",
+            "checkpoint2",
+        ]
 
     async def test_run_failed_execution(self):
         server = _make_server()

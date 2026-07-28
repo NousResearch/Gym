@@ -3,6 +3,11 @@
 This agent integrates [Harbor](https://github.com/laude-institute/harbor) into NeMo Gym.
 It runs Harbor agents (e.g., `terminus-2`) in Harbor-managed environments and returns NeMo Gym-compatible outputs.
 
+The adapter supports Harbor schema-1.3 multi-step tasks. Harbor owns the
+persistent task environment, step gating, and per-step verification. Gym
+preserves the ordered checkpoint instructions/trajectories and reports both the
+aggregate Harbor reward and per-checkpoint reach/reward diagnostics.
+
 ## Table of Contents
 
 - [Overview](#overview)
@@ -229,8 +234,17 @@ Each `/run` call writes to **two** places, for two different audiences:
 - **`harbor_jobs_dir`** (set via `configs/harbor_agent*.yaml`, default `jobs/`,
   grouped the same way: `<YYYYMMDD>/<dataset_alias>/<model_name>/<job_id>/`) —
   Harbor's own raw trial artifacts and the actual source of truth: per-trial
-  `result.json` (reward, token counts, timing), `agent/trajectory.json` (full
-  ATIF conversation), and `verifier/{reward.txt,reward.json,test-stdout.txt}`.
+  `result.json` (reward, token counts, timing), `agent/trajectory.json` for
+  single-step ATIF output, and
+  `steps/<step>/{agent/trajectory.json,verifier/reward.json,...}` for multi-step
+  output.
+
+For multi-step evaluations, `/aggregate_metrics` additionally reports:
+
+- `step/<step>/reached_rate`
+- `step/<step>/mean_when_reached/<reward-name>`
+
+The overall `mean/reward` remains Harbor's configured aggregate/final reward.
 
 When debugging a suspicious `results/runs/...` file, always cross-check the
 corresponding `harbor_jobs_dir/.../<trial_name>/result.json` and

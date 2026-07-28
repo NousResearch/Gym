@@ -190,6 +190,48 @@ class HarborAgentUtils:
             "total_tokens": input_tokens + output_tokens,
         }
 
+    @staticmethod
+    def extract_usage_for_trial(
+        trial_result: Dict[str, Any],
+        trajectories: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Sum usage over all checkpoint trajectories in a Harbor trial."""
+        if trajectories:
+            usages = [
+                HarborAgentUtils.extract_usage({"agent_result": None}, trajectory) for trajectory in trajectories
+            ]
+            input_tokens = sum(usage["input_tokens"] for usage in usages)
+            output_tokens = sum(usage["output_tokens"] for usage in usages)
+            cached_tokens = sum(usage["input_tokens_details"]["cached_tokens"] for usage in usages)
+            if input_tokens or output_tokens:
+                return {
+                    "input_tokens": input_tokens,
+                    "input_tokens_details": {"cached_tokens": cached_tokens},
+                    "output_tokens": output_tokens,
+                    "output_tokens_details": {"reasoning_tokens": 0},
+                    "total_tokens": input_tokens + output_tokens,
+                }
+
+        step_results = trial_result.get("step_results") or []
+        if step_results:
+            input_tokens = 0
+            output_tokens = 0
+            cached_tokens = 0
+            for step_result in step_results:
+                agent_result = step_result.get("agent_result") or {}
+                input_tokens += agent_result.get("n_input_tokens", 0) or 0
+                output_tokens += agent_result.get("n_output_tokens", 0) or 0
+                cached_tokens += agent_result.get("n_cache_tokens", 0) or 0
+            return {
+                "input_tokens": input_tokens,
+                "input_tokens_details": {"cached_tokens": cached_tokens},
+                "output_tokens": output_tokens,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": input_tokens + output_tokens,
+            }
+
+        return HarborAgentUtils.extract_usage(trial_result)
+
     # ------------------------------------------------------------------ #
     #  Raw content parsing — extract function calls from raw LLM JSON     #
     # ------------------------------------------------------------------ #

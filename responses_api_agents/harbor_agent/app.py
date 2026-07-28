@@ -129,13 +129,75 @@ def _find_trial_dir_with_result(job_dir: Path) -> Optional[Path]:
     return None
 
 
+def _trial_trajectory_paths(trial_dir: Path, trial_result: dict[str, Any]) -> list[Path]:
+    """Return ATIF trajectories in execution order.
+
+    Single-step Harbor trials write ``agent/trajectory.json``. Modern Harbor
+    archives multi-step agent logs under ``steps/<step>/agent/trajectory.json``
+    after each checkpoint. Prefer the ordered per-step files when present and
+    retain the top-level path as a backwards-compatible fallback.
+    """
+    step_paths: list[Path] = []
+    for step_result in trial_result.get("step_results") or []:
+        step_name = step_result.get("step_name")
+        if not isinstance(step_name, str) or not step_name:
+            continue
+        candidate = trial_dir / "steps" / step_name / "agent" / "trajectory.json"
+        if candidate.exists():
+            step_paths.append(candidate)
+
+    if step_paths:
+        return step_paths
+
+    trajectory_path = trial_dir / "agent" / "trajectory.json"
+    return [trajectory_path] if trajectory_path.exists() else []
+
+
+def _load_trial_trajectories(
+    trial_dir: Path,
+    trial_result: dict[str, Any],
+) -> list[dict[str, Any]]:
+    trajectories: list[dict[str, Any]] = []
+    for trajectory_path in _trial_trajectory_paths(trial_dir, trial_result):
+        with trajectory_path.open() as f:
+            trajectories.append(json.load(f))
+    return trajectories
+
+
+def _load_agent_error_flags(
+    trial_dir: Path,
+    trial_result: dict[str, Any],
+) -> dict[str, bool]:
+    """OR agent error flags across a single- or multi-step trial."""
+    agent_dirs: list[Path] = []
+    step_results = trial_result.get("step_results") or []
+    for step_result in step_results:
+        step_name = step_result.get("step_name")
+        if isinstance(step_name, str) and step_name:
+            agent_dirs.append(trial_dir / "steps" / step_name / "agent")
+    if not agent_dirs:
+        agent_dirs.append(trial_dir / "agent")
+
+    combined: dict[str, bool] = {}
+    for agent_dir in agent_dirs:
+        flags_path = agent_dir / "agent_error_flags.json"
+        if not flags_path.exists():
+            continue
+        with flags_path.open() as f:
+            flags = json.load(f)
+        for key, value in flags.items():
+            combined[key] = combined.get(key, False) or bool(value)
+    return combined
+
+
 async def run_harbor_job(job_config_dict: dict) -> str:
     """Runs a single Harbor Job and returns the *absolute* trial directory path.
 
     The trial directory contains:
     - result.json: Summary result with reward, agent_result, verifier_result, etc.
-    - agent/trajectory.json: Full ATIF trajectory with per-step messages, tool
-      calls, observations, and per-token logprobs.
+    - agent/trajectory.json: Full ATIF trajectory for a single-step task.
+    - steps/<step>/agent/trajectory.json: One ATIF trajectory per checkpoint
+      for a multi-step task.
 
     Harbor writes result.json and trajectory.json to disk even when the trial
     fails (e.g. verifier timeout, reward file not found, OOM).  We recover the
@@ -158,7 +220,7 @@ async def run_harbor_job(job_config_dict: dict) -> str:
     from harbor.models.job.config import JobConfig
 
     config = JobConfig(**job_config_dict)
-    job = Job(config)
+    job = await Job.create(config)
 
     job_error = None
     try:
@@ -228,6 +290,43 @@ class HarborAgent(SimpleResponsesAPIAgent):
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         return app
 
+    def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
+        """Aggregate Harbor's named checkpoint rewards for multi-step evals.
+
+        Overall ``reward`` remains the benchmark's primary scalar. These
+        diagnostics make checkpoint reachability and conditional checkpoint
+        scores visible instead of hiding them inside result metadata.
+        """
+        rollouts = [rollout for task in tasks for rollout in task]
+        rollout_count = len(rollouts)
+        reached_by_step: dict[str, int] = {}
+        rewards_by_step: dict[tuple[str, str], list[float]] = {}
+
+        for rollout in rollouts:
+            metadata = rollout.get("metadata") or {}
+            for step_result in metadata.get("step_results") or []:
+                step_name = step_result.get("step_name")
+                if not isinstance(step_name, str) or not step_name:
+                    continue
+                reached_by_step[step_name] = reached_by_step.get(step_name, 0) + 1
+                verifier_result = step_result.get("verifier_result") or {}
+                for reward_name, reward_value in (verifier_result.get("rewards") or {}).items():
+                    if isinstance(reward_value, (int, float)):
+                        rewards_by_step.setdefault((step_name, reward_name), []).append(float(reward_value))
+
+        metrics: dict[str, Any] = {}
+        for step_name, reached_count in sorted(reached_by_step.items()):
+            metrics[f"step/{step_name}/reached_count"] = reached_count
+            metrics[f"step/{step_name}/reached_rate"] = reached_count / rollout_count if rollout_count else 0.0
+        for (step_name, reward_name), values in sorted(rewards_by_step.items()):
+            metrics[f"step/{step_name}/mean_when_reached/{reward_name}"] = sum(values) / len(values)
+        return metrics
+
+    def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
+        key_metrics = super().get_key_metrics(agent_metrics)
+        key_metrics.update({key: value for key, value in agent_metrics.items() if key.startswith("step/")})
+        return key_metrics
+
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         raise NotImplementedError
 
@@ -274,19 +373,10 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 with open(trial_dir / "result.json", "r") as f:
                     trial_result = json.load(f)
 
-                # Read the ATIF trajectory (full conversation with per-token logprobs)
-                trajectory = None
-                trajectory_path = trial_dir / "agent" / "trajectory.json"
-                if trajectory_path.exists():
-                    with open(trajectory_path, "r") as f:
-                        trajectory = json.load(f)
-
-                # Read agent error flags written by the agent
-                agent_error_flags = {}
-                agent_error_flags_path = trial_dir / "agent" / "agent_error_flags.json"
-                if agent_error_flags_path.exists():
-                    with open(agent_error_flags_path, "r") as f:
-                        agent_error_flags = json.load(f)
+                # Modern Harbor archives one ATIF trajectory and error-flags
+                # file per checkpoint for multi-step tasks.
+                trajectories = _load_trial_trajectories(trial_dir, trial_result)
+                agent_error_flags = _load_agent_error_flags(trial_dir, trial_result)
 
                 # Extract reward from verifier result
                 verifier_result = trial_result.get("verifier_result")
@@ -294,18 +384,27 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
                 # Convert Harbor outputs to NeMo Gym response items:
                 # keep rich trajectory details, then overlay rollout token details when present.
-                output_items = HarborAgentUtils.trial_result_to_responses(trial_result, trajectory)
+                output_items = [
+                    item
+                    for trajectory in trajectories
+                    for item in HarborAgentUtils.trial_result_to_responses(trial_result, trajectory)
+                ]
 
-                # Extract the initial instruction from the trajectory as input messages
-                input_messages = HarborAgentUtils.extract_input_from_trajectory(trajectory)
+                # Preserve each checkpoint instruction in execution order.
+                input_messages = [
+                    message
+                    for trajectory in trajectories
+                    for message in HarborAgentUtils.extract_input_from_trajectory(trajectory)
+                ]
 
-                # Populate usage from trajectory final_metrics or agent_result
-                usage = HarborAgentUtils.extract_usage(trial_result, trajectory)
+                # Sum usage across checkpoint trajectories, with a result.json
+                # fallback for agents that do not emit ATIF metrics.
+                usage = HarborAgentUtils.extract_usage_for_trial(trial_result, trajectories)
 
             except Exception as e:
                 print(f"Error running Harbor job: {e}")
                 trial_result = None
-                trajectory = None
+                trajectories = []
                 agent_error_flags = {}
                 output_items = []
                 input_messages = []
@@ -418,13 +517,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
         responses_create_params: Optional[dict[str, Any]] = None,
     ) -> dict:
         """Build a Harbor JobConfig dict for a single task."""
-        from harbor.models.job.config import (
-            JobConfig,
-            LocalDatasetConfig,
-            OrchestratorConfig,
-            RegistryDatasetConfig,
-        )
-        from harbor.models.registry import RemoteRegistryInfo
+        from harbor.models.job.config import DatasetConfig, JobConfig
         from harbor.models.trial.config import (
             AgentConfig,
             EnvironmentConfig,
@@ -499,20 +592,14 @@ class HarborAgent(SimpleResponsesAPIAgent):
             ),
         )
 
-        orchestrator_config = OrchestratorConfig(
-            n_concurrent_trials=1,
-            quiet=True,
-        )
-
         if has_registry:
-            dataset_config = RegistryDatasetConfig(
-                registry=RemoteRegistryInfo(),
+            dataset_config = DatasetConfig(
                 name=dataset_source.dataset_name,
                 version=dataset_source.dataset_version,
                 task_names=[task_name],
             )
         else:
-            dataset_config = LocalDatasetConfig(
+            dataset_config = DatasetConfig(
                 path=Path(dataset_source.local_dataset_path),
                 task_names=[task_name],
             )
@@ -523,7 +610,8 @@ class HarborAgent(SimpleResponsesAPIAgent):
             timeout_multiplier=(
                 self.config.harbor_timeout_multiplier if self.config.harbor_timeout_multiplier is not None else 1.0
             ),
-            orchestrator=orchestrator_config,
+            n_concurrent_trials=1,
+            quiet=True,
             environment=environment_config,
             verifier=verifier_config,
             agents=[agent_config],
