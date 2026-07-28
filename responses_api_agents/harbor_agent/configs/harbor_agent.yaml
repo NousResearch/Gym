@@ -44,6 +44,11 @@ harbor_agent:
           input_cost_per_token: 0.0
           output_cost_per_token: 0.0
 
+      # Optional environment overrides for installed Harbor agents. Agents
+      # running inside task containers may need a model endpoint reachable
+      # from that container instead of Gym's host-loopback model server.
+      harbor_agent_env: {}
+
       # Environment – which Harbor environment to use (set name or import_path)
       harbor_environment_type: null
       # Use custom Singularity backend for HPC clusters.

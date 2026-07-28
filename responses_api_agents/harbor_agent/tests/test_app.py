@@ -610,12 +610,21 @@ class TestApp:
         assert config["environment"]["kwargs"] == {"network_block_all": False}
         assert config["agents"][0]["kwargs"]["max_turns"] == 3
         assert config["agents"][0]["kwargs"]["collect_rollout_details"] is True
+        assert config["agents"][0]["env"] == {
+            "OPENAI_API_KEY": "nemo-gym-internal",
+            "OPENAI_BASE_URL": "http://policy-host:9000/v1",
+        }
 
     def test_build_job_config_import_path_overrides_environment_type(self) -> None:
         pytest.importorskip("harbor")
         server = _make_server(
             harbor_environment_type="daytona",
             harbor_environment_import_path="custom.module:CustomEnvironment",
+            harbor_agent_env={
+                "OPENAI_API_KEY": "external-placeholder",
+                "OPENAI_BASE_URL": "http://reachable-model:8000/v1",
+                "CUSTOM_AGENT_SETTING": "enabled",
+            },
         )
 
         config = server._build_job_config(
@@ -629,6 +638,11 @@ class TestApp:
 
         assert config["environment"]["type"] is None
         assert config["environment"]["import_path"] == "custom.module:CustomEnvironment"
+        assert config["agents"][0]["env"] == {
+            "OPENAI_API_KEY": "external-placeholder",
+            "OPENAI_BASE_URL": "http://reachable-model:8000/v1",
+            "CUSTOM_AGENT_SETTING": "enabled",
+        }
 
     def test_build_job_config_supports_registry_dataset_with_daytona(self) -> None:
         pytest.importorskip("harbor")

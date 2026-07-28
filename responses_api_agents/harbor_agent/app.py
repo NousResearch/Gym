@@ -65,6 +65,10 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
     # Extra kwargs forwarded to the Harbor AgentConfig (e.g. collect_rollout_details,
     # model_info). See harbor_agent.yaml for examples.
     harbor_agent_kwargs: Optional[dict[str, Any]] = None
+    # Environment forwarded to installed Harbor agents. This is primarily for
+    # agents that run inside the task container and therefore cannot reach a
+    # Gym model server advertised on the host's loopback interface.
+    harbor_agent_env: Optional[dict[str, str]] = None
 
     # --- Dataset routing ---
     # Map of dataset aliases to source definitions. Each alias must define exactly
@@ -533,10 +537,24 @@ class HarborAgent(SimpleResponsesAPIAgent):
         if self.config.harbor_agent_kwargs:
             agent_kwargs.update(self.config.harbor_agent_kwargs)
 
+        agent_env = {
+            "OPENAI_API_KEY": "nemo-gym-internal",
+            "OPENAI_BASE_URL": api_base,
+        }
+        if self.config.harbor_agent_env:
+            agent_env.update(self.config.harbor_agent_env)
+
         agent_config = AgentConfig(
             name=self.config.harbor_agent_name if not self.config.harbor_agent_import_path else None,
             import_path=self.config.harbor_agent_import_path,
             model_name=model_name,
+            # Harbor's installed agents (including ``hermes``) discover an
+            # OpenAI-compatible model endpoint through environment variables,
+            # whereas custom Gym-native agents consume ``api_base`` from
+            # ``kwargs`` above. Point both paths at the same internal Gym model
+            # server. The server does not require authentication, but clients
+            # expect a non-empty key to select the OpenAI-compatible provider.
+            env=agent_env,
             override_timeout_sec=(
                 float(self.config.harbor_agent_override_timeout)
                 if self.config.harbor_agent_override_timeout is not None

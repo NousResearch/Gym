@@ -1,2 +1,2 @@
 -e nemo-gym[dev] @ ../../
-harbor @ git+https://github.com/NousResearch/harbor-fork.git@60d4374d38c669162d18eb6deb0c6a982469f3c2
+harbor @ git+https://github.com/NousResearch/harbor-fork.git@39eee01b56ab5cb511e1576b165ef29f06cc0d21
