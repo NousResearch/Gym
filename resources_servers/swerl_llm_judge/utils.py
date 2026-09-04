@@ -55,6 +55,19 @@ def get_repo_path(repo_name, repo_playground):
     return os.path.join(repo_playground, repo_to_folder_name(repo_name))
 
 
+def _assert_git_worktree(repo_path):
+    """Refuse to run destructive git commands outside a real repository clone.
+
+    `git reset --hard` and `git clean -fd` are unrecoverable for uncommitted work
+    and untracked files, so the target is proven to be a git worktree root before
+    either runs, instead of being assumed from a path string.
+    """
+    if not repo_path or not os.path.isdir(repo_path):
+        raise ValueError(f"Refusing to reset a non-existent repository path: {repo_path!r}")
+    if not os.path.exists(os.path.join(repo_path, ".git")):
+        raise ValueError(f"Refusing to reset {repo_path!r}: it is not a git worktree root")
+
+
 def checkout_commit(repo_name, repo_playground, commit_id, reset=False):
     """Checkout the specified commit in the given local git repository.
     :param repo_name: Name of he repository
@@ -67,12 +80,32 @@ def checkout_commit(repo_name, repo_playground, commit_id, reset=False):
         repo_path = get_repo_path(repo_name, repo_playground)
         print(f"Checking out commit {commit_id} in repository at {repo_path}...")
         if reset:
-            subprocess.run(f"cd {repo_path} && git stash && git reset --hard && git clean -fd", shell=True, check=True)
+            # Run each git command as an argv list against `git -C <path>` instead
+            # of building one shell string. The previous form had two problems:
+            #
+            #   * repo_path was interpolated into a `shell=True` command line, and
+            #     it derives from the dataset's own `repo` field via
+            #     repo_to_folder_name() -> repo_name.split("/")[-1]. A repo value
+            #     containing shell metacharacters therefore became extra commands,
+            #     and an ordinary space in repo_playground broke the `cd`.
+            #   * `cd "" && git reset --hard && git clean -fd` succeeds without
+            #     moving anywhere, so an empty or unresolved repo_path aimed the
+            #     destructive pair at the caller's own working directory.
+            _assert_git_worktree(repo_path)
+            for argv in (
+                ["git", "-C", repo_path, "stash"],
+                ["git", "-C", repo_path, "reset", "--hard"],
+                ["git", "-C", repo_path, "clean", "-fd"],
+            ):
+                subprocess.run(argv, check=True)
         subprocess.run(["git", "-C", repo_path, "checkout", commit_id], check=True)
         print("Commit checked out successfully.")
         return True
-    except:
-        print("An error occurred while checking out the commit")
+    except Exception as e:
+        # Was a bare `except:`, which also swallowed KeyboardInterrupt and
+        # SystemExit — a long dataset loop could not be stopped with Ctrl-C — and
+        # threw away the reason for the failure. Same return contract as before.
+        print(f"An error occurred while checking out the commit: {e!r}")
         return False
 
 
