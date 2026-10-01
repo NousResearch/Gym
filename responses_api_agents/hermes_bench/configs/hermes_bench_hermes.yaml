@@ -1,0 +1,45 @@
+hermes_bench_hermes:
+  responses_api_agents:
+    hermes_bench:
+      entrypoint: app.py
+      domain: agent
+      description: HermesBench tasks run by Hermes-Agent inside isolated task sandboxes.
+      value: Evaluate tool use, skills, memory, safety, and artifact creation.
+
+      agent_kwargs:
+        max_turns: 90
+        terminal_backend: local
+        terminal_timeout: 180
+        enabled_toolsets: [terminal, file, code_execution, memory, skills, session_search]
+
+      sandbox_provider: sandbox
+      sandbox_spec:
+        image: ${oc.env:HERMES_BENCH_IMAGE}
+        workdir: /sandbox/workspace
+        ready_timeout_s: 600
+      grader_sandbox_spec: {}
+      sandbox_model_base_url: ${oc.env:NEMO_GYM_SANDBOX_MODEL_BASE_URL,null}
+      agent_runtime_source: auto
+      preserve_hermes_behavior: true
+      agent_timeout_s: 1800
+      grader_timeout_s: 1800
+      timeout_multiplier: 2.0
+      concurrency: 4
+
+      judge_model: ${oc.env:HERMES_BENCH_JUDGE_MODEL,null}
+      grader_env:
+        NOUS_API_KEY: ${oc.env:NOUS_API_KEY,''}
+        OPENROUTER_API_KEY: ${oc.env:OPENROUTER_API_KEY,''}
+        P5_RENDER_CMD: python3 /sandbox/control/p5_direct.py {sketch} {out} {extra}
+      grader_env_files: {}
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: hermes_bench
+          type: benchmark
+          jsonl_fpath: responses_api_agents/hermes_bench/data/hermes_bench.jsonl
+          prompt_config: null
+          prepare_script: responses_api_agents/hermes_bench/prepare.py

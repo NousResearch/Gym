@@ -1,0 +1,55 @@
+policy_model:
+  responses_api_models:
+    openai_model:
+      host: 0.0.0.0
+      port: 10240
+
+sandbox:
+  default_metadata:
+    sandbox-api: opensandbox-sdk
+  opensandbox:
+    connection:
+      domain: k8s-opensand-opensand-79e2505e2f-79f31e302dbc949f.elb.us-east-2.amazonaws.com
+      api_key: loaded-from-file
+      protocol: http
+      request_timeout_s: 300
+      use_server_proxy: true
+    create:
+      request_timeout_s: 1200
+      timeout_s: 1200
+      skip_health_check: true
+      retries: 10
+      retry_delay_s: 5.0
+      retry_max_delay_s: 90.0
+    probe:
+      timeout_s: 60
+      deadline_s: 180
+      stable_count: 2
+      stable_delay_s: 1.0
+    operations:
+      retries: 5
+      retry_delay_s: 1.0
+      retry_max_delay_s: 45.0
+      command_retries: 0
+      close_timeout_s: 30
+
+hermes_bench_hermes:
+  responses_api_agents:
+    hermes_bench:
+      concurrency: 64
+      sandbox_provider_api_key_file: /workspace/.secrets/opensandbox_api_key
+      sandbox_image_auth_file: /workspace/.secrets/gitlab_registry_token
+      sandbox_model_base_url: http://${oc.env:SLURM_MASTER_NODE}:10240/v1
+      sandbox_model_resolve_host: true
+      judge_model: aws/anthropic/bedrock-claude-opus-4-7
+      grader_env:
+        NOUS_API_BASE_URL: https://inference-api.nvidia.com/v1
+        HERMES_ARCHITECTURE_JUDGE_URL: https://inference-api.nvidia.com/v1/chat/completions
+        HERMES_ARCHITECTURE_SCORE_CACHE_CONTROL: 'false'
+        HERMES_JUDGE_MODEL_MAP: '{"anthropic/claude-opus-4.7":"aws/anthropic/bedrock-claude-opus-4-7","google/gemini-3.5-flash":"gcp/google/gemini-3.5-flash","google/gemini-3.1-flash-lite":"gcp/google/gemini-3.1-flash-lite"}'
+      grader_env_files:
+        NOUS_API_KEY: /workspace/.secrets/inference_api_key
+      sandbox_spec:
+        provider_options:
+          image_auth:
+            username: ${oc.env:HERMES_BENCH_IMAGE_USERNAME,cmunley}

@@ -1,0 +1,17 @@
+policy_model:
+  responses_api_models:
+    openai_model:
+      host: 0.0.0.0
+      port: 10240
+
+hermes_bench_hermes:
+  responses_api_agents:
+    hermes_bench:
+      sandbox_model_base_url: http://${oc.env:SLURM_MASTER_NODE}:10240/v1
+      sandbox_model_resolve_host: true
+      judge_model: aws/anthropic/bedrock-claude-opus-4-7
+      grader_env:
+        NOUS_API_BASE_URL: https://inference-api.nvidia.com/v1
+        HERMES_ARCHITECTURE_JUDGE_URL: https://inference-api.nvidia.com/v1/chat/completions
+        HERMES_ARCHITECTURE_SCORE_CACHE_CONTROL: 'false'
+        HERMES_JUDGE_MODEL_MAP: '{"anthropic/claude-opus-4.7":"aws/anthropic/bedrock-claude-opus-4-7","google/gemini-3.5-flash":"gcp/google/gemini-3.5-flash","google/gemini-3.1-flash-lite":"gcp/google/gemini-3.1-flash-lite"}'

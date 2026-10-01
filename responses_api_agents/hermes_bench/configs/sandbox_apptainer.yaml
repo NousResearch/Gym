@@ -1,0 +1,38 @@
+sandbox:
+  default_metadata:
+    sandbox-api: apptainer-cli
+  apptainer:
+    create:
+      mount_point: /sandbox
+      start_timeout_s: 600
+      apply_resource_limits: true
+      # Apptainer shares the host $HOME *and* /tmp with the container unless
+      # told otherwise. Without containment every task sandbox can read AND
+      # write the host home dir (the HermesBench source repo, the
+      # tools/*_fixtures_expected.json answer sidecars, ~/.env, ~/.ssh) and
+      # the host /tmp.
+      #
+      # Observed 2026-08-16 (energy_utility calibration), twice:
+      #   * run 1: an agent whose first execute_code landed in a temp cwd ran
+      #     os.walk('/'), found the fixtures under
+      #     /home/<user>/Projects/HermesBench/assets/ and wrote its two
+      #     deliverables there. Scored 0.0 with an empty workspace, and
+      #     mutated the source repo as a side effect.
+      #   * run 2 (--no-home only): the same recovery path found the host
+      #     /tmp and wrote into /tmp/pytest-of-<user>/pytest-244/... — a
+      #     pytest tmpdir from the maintainer's own test run. Scored 0.25.
+      #
+      # --contain gives the container a private /tmp and no host home, which
+      # closes both. It does NOT isolate /sandbox: the staging bind above is
+      # explicit and still works.
+      extra_start_args:
+        - --contain
+    exec:
+      default_timeout_s: 180
+      fakeroot_for_root: false
+      concurrency: 32
+    probe:
+      command: printf apptainer-sandbox-ready
+      expected_stdout: apptainer-sandbox-ready
+      timeout_s: 30
+      deadline_s: 120

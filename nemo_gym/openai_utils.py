@@ -102,8 +102,11 @@ from nemo_gym.server_utils import (
 # Training-specific
 ########################################
 
-# Per-token routed expert indices with shape [tokens, num_moe_layers, topk].
-RoutedExperts: TypeAlias = List[List[List[int]]]
+# Per-token routed expert indices with shape [tokens, num_moe_layers, topk], either as
+# nested int lists or as an opaque string envelope produced by the training framework
+# (e.g. NeMo-RL's "nrlre1:<dtype>:<SxLxK>:<base64>"). Gym never inspects the value; the
+# string form keeps multi-MB payloads cheap to validate and re-serialize at every hop.
+RoutedExperts: TypeAlias = Union[str, List[List[List[int]]]]
 
 
 class TokenIDLogProbMixin(BaseModel):
@@ -361,6 +364,13 @@ class NeMoGymResponseUsage(ResponseUsage):
 class NeMoGymResponse(Response):
     output: List[NeMoGymResponseOutputItem]
     usage: Optional[NeMoGymResponseUsage] = None
+    # Some Responses-API backends (e.g. Nous Portal) do not echo the request's
+    # `tools` / `tool_choice` / `parallel_tool_calls` back in the response
+    # object, while openai.types.responses.Response requires them. They are
+    # passthrough echo fields nothing downstream consumes, so default them.
+    tools: Optional[List[Any]] = None
+    tool_choice: Optional[Any] = None
+    parallel_tool_calls: Optional[bool] = None
 
 
 ########################################

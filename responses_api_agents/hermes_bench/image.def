@@ -1,0 +1,49 @@
+# Apptainer recipe for the HermesBench sandbox image (agent + grader).
+#
+# This mirrors responses_api_agents/hermes_bench/Dockerfile so Docker/
+# OpenSandbox and Apptainer deployments run the same environment. Keep the
+# two files in sync. (Alternatively, build the Dockerfile and convert:
+#   apptainer build hermes-bench.sif docker-daemon://hermes-bench:local )
+#
+# Build directly:
+#   apptainer build --fakeroot hermes-bench.sif responses_api_agents/hermes_bench/image.def
+# Then:
+#   export HERMES_BENCH_IMAGE=/path/to/hermes-bench.sif
+#
+# Layer map — removing a layer silently zeroes a whole task category:
+#   git/curl/tar/ripgrep      agent sandbox: shell tools for terminal tasks;
+#                             curl also serves the agent_deps_url path
+#   pyyaml + requests         grader: lib_grading imports / judge HTTP calls
+#   chromium (apt)            grader: browser at /usr/bin/chromium for BOTH
+#                             the architecture-diagram judge (find_chromium)
+#                             and the p5js render harness (puppeteer-core
+#                             checks P5_CHROME_PATH then /usr/bin/chromium)
+#   playwright (pip)          grader: architecture render driver; uses the
+#                             system chromium above, no browser download
+#   pillow                    grader: 2x2 overlap chunking of arch renders
+#   nodejs + npm              grader: p5js render_check.js (its node_modules
+#                             ship inside support.tar.gz via `npm ci` in
+#                             prepare.py)
+
+Bootstrap: docker
+From: python:3.13-slim
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        chromium \
+        curl \
+        git \
+        nodejs \
+        npm \
+        ripgrep \
+        && rm -rf /var/lib/apt/lists/*
+    python -m pip install --no-cache-dir \
+        "pillow>=10.0.0" \
+        "playwright>=1.56.0" \
+        "pyyaml>=6.0.1" \
+        "requests>=2.31.0"
+
+%runscript
+    exec python3 "$@"
